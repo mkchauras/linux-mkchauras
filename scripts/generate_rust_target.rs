@@ -161,6 +161,31 @@ fn main() {
         ts.push("features", features);
         ts.push("llvm-target", "x86_64-linux-gnu");
         ts.push("target-pointer-width", "64");
+    } else if cfg.has("PPC64") {
+        ts.push("arch", "powerpc64");
+        ts.push(
+            "data-layout",
+            "e-m:e-i64:64-n32:64",
+        );
+        let mut features = "-altivec,-vsx,-hard-float".to_string();
+        if cfg.has("RETPOLINE") {
+            features += ",+retpoline-external-thunk";
+        }
+        ts.push("features", features);
+        ts.push("env", "gnu");
+        ts.push("cpu","ppc64le");
+        ts.push("linker-is-gnu",true);
+        ts.push("max-atomic-width",64);
+        ts.push("os","none");
+        ts.push("panic-strategy","abort");
+        ts.push("llvm-target", "powerpc64le-elf");
+        ts.push("target-pointer-width", "64");
+        ts.push("position-independent-executables", "true");
+        ts.push("relocation-model", "static");
+        ts.push("relro-level","full");
+        ts.push("target-family", "unix");
+        ts.push("target-mcount", "_mcount");
+        ts.push("target-endian", "little");
     } else {
         panic!("Unsupported architecture");
     }
