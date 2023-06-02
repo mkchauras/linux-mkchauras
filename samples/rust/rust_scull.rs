@@ -1,6 +1,6 @@
 //! Rust Scull Driver
 
-use kernel::{prelude::*, file};
+use kernel::{prelude::*, file, miscdev};
 use kernel::file::File;
 
 module! {
@@ -11,7 +11,9 @@ module! {
     license: "GPL",
 }
 
-struct Scull;
+struct Scull {
+    _dev: Pin<Box<miscdev::Registration<Scull>>>,
+}
 
 #[vtable]
 impl file::Operations for Scull {
@@ -25,7 +27,11 @@ impl file::Operations for Scull {
 impl kernel::Module for Scull {
     fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Scull Driver Loaded\n");
-        Ok(Scull{})
+        let reg = miscdev::Registration::new_pinned(fmt!("scull"), ())?;
+
+        Ok(Scull{
+            _dev: reg
+        })
     }
 }
 
