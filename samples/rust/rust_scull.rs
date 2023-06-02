@@ -1,10 +1,9 @@
 //! Rust Scull Driver
 
-use kernel::sync::{Arc, ArcBorrow, UniqueArc};
-use kernel::{prelude::*, file, miscdev};
 use kernel::file::File;
 use kernel::io_buffer::{IoBufferReader, IoBufferWriter};
-
+use kernel::sync::{Arc, ArcBorrow, UniqueArc};
+use kernel::{file, miscdev, prelude::*};
 
 module! {
     type: Scull,
@@ -32,13 +31,13 @@ impl file::Operations for Scull {
         pr_info!("File Opened for device {}\n", context.num);
         Ok(context.clone())
     }
-    
+
     fn release(_data: Self::Data, _file: &File) {
         pr_info!("File is closed\n");
     }
 
     fn read(
-        data: ArcBorrow<'_, Device>, 
+        data: ArcBorrow<'_, Device>,
         _file: &file::File,
         _writer: &mut impl IoBufferWriter,
         _offset: u64,
@@ -61,16 +60,13 @@ impl file::Operations for Scull {
 impl kernel::Module for Scull {
     fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
         pr_info!("Scull Driver Loaded\n");
-        let dev = Arc::try_new(Device{
+        let dev = Arc::try_new(Device {
             num: 123,
             contents: Vec::new(),
         })?;
 
         let reg = miscdev::Registration::new_pinned(fmt!("scull"), dev)?;
 
-        Ok(Scull{
-            _dev: reg
-        })
+        Ok(Scull { _dev: reg })
     }
 }
-
