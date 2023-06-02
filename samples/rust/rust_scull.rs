@@ -1,6 +1,7 @@
 //! Rust Scull Driver
 
-use kernel::prelude::*;
+use kernel::{prelude::*, file};
+use kernel::file::File;
 
 module! {
     type: Scull,
@@ -11,6 +12,15 @@ module! {
 }
 
 struct Scull;
+
+#[vtable]
+impl file::Operations for Scull {
+
+    fn open(_context: &Self::OpenData, _file: &File) -> Result<Self::Data> {
+        pr_info!("File Opened\n");
+        Ok(())
+    }
+}
 
 impl kernel::Module for Scull {
     fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
