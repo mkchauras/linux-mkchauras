@@ -2,7 +2,8 @@
 
 use kernel::file::File;
 use kernel::io_buffer::{IoBufferReader, IoBufferWriter};
-use kernel::sync::{Arc, ArcBorrow, UniqueArc};
+use kernel::sync::smutex::Mutex;
+use kernel::sync::{Arc, ArcBorrow};
 use kernel::{file, miscdev, prelude::*};
 
 module! {
@@ -11,16 +12,22 @@ module! {
     author: "Mukesh Kumar Chaurasiya",
     description: "Scull Module",
     license: "GPL",
+    params: {
+        nr_devs: u8 {
+            default: 10,
+            permissions: 0o644,
+            description: "Number of Scull Devices",
+        },
+    },
 }
 
-#[derive(Debug)]
 struct Device {
     num: usize,
-    contents: Vec<u8>,
+    contents: Mutex<Vec<u8>>,
 }
 
 struct Scull {
-    _dev: Pin<Box<miscdev::Registration<Scull>>>,
+    _devs: Vec<Pin<Box<miscdev::Registration<Scull>>>>,
 }
 
 #[vtable]
@@ -58,15 +65,19 @@ impl file::Operations for Scull {
 }
 
 impl kernel::Module for Scull {
-    fn init(_name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
+    fn init(_name: &'static CStr, module: &'static ThisModule) -> Result<Self> {
         pr_info!("Scull Driver Loaded\n");
-        let dev = Arc::try_new(Device {
-            num: 123,
-            contents: Vec::new(),
-        })?;
+        let count = (*nr_devs.read(&module.kernel_param_lock())).try_into()?;
+        let mut devs = Vec::try_with_capacity(count)?;
+        for i in 0..count {
+            let state = Arc::try_new(Device {
+                num: i,
+                contents: Mutex::new(Vec::new()),
+            })?;
 
-        let reg = miscdev::Registration::new_pinned(fmt!("scull"), dev)?;
-
-        Ok(Scull { _dev: reg })
+            let reg = miscdev::Registration::new_pinned(fmt!("scull{i}"), state)?;
+            devs.try_push(reg)?;
+        }
+        Ok(Scull { _devs: devs })
     }
 }
