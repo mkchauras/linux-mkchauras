@@ -2,6 +2,7 @@
 
 use kernel::{prelude::*, file, miscdev};
 use kernel::file::File;
+use kernel::io_buffer::{IoBufferReader, IoBufferWriter};
 
 module! {
     type: Scull,
@@ -21,6 +22,30 @@ impl file::Operations for Scull {
     fn open(_context: &Self::OpenData, _file: &File) -> Result<Self::Data> {
         pr_info!("File Opened\n");
         Ok(())
+    }
+    
+    fn release(_data: Self::Data, _file: &File) {
+        pr_info!("File is closed\n");
+    }
+
+    fn read(
+        _data: (), 
+        _file: &file::File,
+        _writer: &mut impl IoBufferWriter,
+        _offset: u64,
+    ) -> Result<usize> {
+        pr_info!("File is Read\n");
+        Ok(0)
+    }
+
+    fn write(
+        _data: (),
+        _file: &file::File,
+        reader: &mut impl IoBufferReader,
+        _offset: u64,
+    ) -> Result<usize> {
+        pr_info!("File is written\n");
+        Ok(reader.len())
     }
 }
 
