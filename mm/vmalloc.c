@@ -8,6 +8,7 @@
  *  Improving global KVA allocator, Uladzislau Rezki, Sony, May 2019
  */
 
+#include "linux/export.h"
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -804,6 +805,7 @@ static DEFINE_SPINLOCK(vmap_area_lock);
 static DEFINE_SPINLOCK(free_vmap_area_lock);
 /* Export for kexec only */
 LIST_HEAD(vmap_area_list);
+EXPORT_SYMBOL_GPL(vmap_area_list);
 static struct rb_root vmap_area_root = RB_ROOT;
 static bool vmap_initialized __read_mostly;
 

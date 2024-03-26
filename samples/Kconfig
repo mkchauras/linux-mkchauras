@@ -69,6 +69,16 @@ config SAMPLE_KOBJECT
 
 	  If in doubt, say "N" here.
 
+config SAMPLE_AT
+       tristate "Build Address Translation Module"
+       help
+	  This config option enable AT module
+
+config SAMPLE_AT_TEST
+       tristate "Build Test Module for Address Translation Module"
+       help
+	  This config option enable AT test module
+
 config SAMPLE_KPROBES
 	tristate "Build kprobes examples -- loadable modules only"
 	depends on KPROBES && m

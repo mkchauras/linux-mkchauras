@@ -2678,6 +2678,8 @@ void rmap_walk(struct folio *folio, struct rmap_walk_control *rwc)
 		rmap_walk_file(folio, rwc, false);
 }
 
+EXPORT_SYMBOL_GPL(rmap_walk);
+
 /* Like rmap_walk, but caller holds relevant rmap lock */
 void rmap_walk_locked(struct folio *folio, struct rmap_walk_control *rwc)
 {
