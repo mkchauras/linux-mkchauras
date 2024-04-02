@@ -1126,6 +1126,7 @@ struct rq {
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	u64			prev_irq_time;
+	u64			prev_soft_time;
 #endif
 #ifdef CONFIG_PARAVIRT
 	u64			prev_steal_time;

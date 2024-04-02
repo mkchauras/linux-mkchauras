@@ -277,13 +277,14 @@ void __delayacct_wpcopy_end(void)
 		      &current->delays->wpcopy_count);
 }
 
-void __delayacct_irq(struct task_struct *task, u32 delta)
+void __delayacct_irq(struct task_struct *task, u32 delta, u32 delta_soft)
 {
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&task->delays->lock, flags);
 	task->delays->irq_delay += delta;
 	task->delays->irq_count++;
+	task->delays->soft_delay += delta_soft;
+	task->delays->soft_count++;
 	raw_spin_unlock_irqrestore(&task->delays->lock, flags);
 }
-

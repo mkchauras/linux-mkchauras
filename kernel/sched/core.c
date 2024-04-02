@@ -698,10 +698,11 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
  * In theory, the compile should just see 0 here, and optimize out the call
  * to sched_rt_avg_update. But I don't trust it...
  */
-	s64 __maybe_unused steal = 0, irq_delta = 0;
+	s64 __maybe_unused steal = 0, irq_delta = 0, soft_delta = 0;
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 	irq_delta = irq_time_read(cpu_of(rq)) - rq->prev_irq_time;
+	soft_delta = irq_time_read_soft(cpu_of(rq)) - rq->prev_soft_time;
 
 	/*
 	 * Since irq_time is only updated on {soft,}irq_exit, we might run into
@@ -722,9 +723,10 @@ static void update_rq_clock_task(struct rq *rq, s64 delta)
 		irq_delta = delta;
 
 	rq->prev_irq_time += irq_delta;
+	rq->prev_soft_time += soft_delta;
 	delta -= irq_delta;
 	psi_account_irqtime(rq->curr, irq_delta);
-	delayacct_irq(rq->curr, irq_delta);
+	delayacct_irq(rq->curr, irq_delta, soft_delta);
 #endif
 #ifdef CONFIG_PARAVIRT_TIME_ACCOUNTING
 	if (static_key_false((&paravirt_steal_rq_enabled))) {
