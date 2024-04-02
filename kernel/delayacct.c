@@ -180,6 +180,8 @@ int delayacct_add_tsk(struct taskstats *d, struct task_struct *tsk)
 	d->wpcopy_delay_total = (tmp < d->wpcopy_delay_total) ? 0 : tmp;
 	tmp = d->irq_delay_total + tsk->delays->irq_delay;
 	d->irq_delay_total = (tmp < d->irq_delay_total) ? 0 : tmp;
+	tmp = d->soft_delay_total + tsk->delays->soft_delay;
+	d->soft_delay_total = (tmp < d->soft_delay_total) ? 0 : tmp;
 	d->blkio_count += tsk->delays->blkio_count;
 	d->swapin_count += tsk->delays->swapin_count;
 	d->freepages_count += tsk->delays->freepages_count;
@@ -187,6 +189,7 @@ int delayacct_add_tsk(struct taskstats *d, struct task_struct *tsk)
 	d->compact_count += tsk->delays->compact_count;
 	d->wpcopy_count += tsk->delays->wpcopy_count;
 	d->irq_count += tsk->delays->irq_count;
+	d->soft_count += tsk->delays->soft_count;
 	raw_spin_unlock_irqrestore(&tsk->delays->lock, flags);
 
 	return 0;

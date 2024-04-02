@@ -210,6 +210,8 @@ static void print_delayacct(struct taskstats *t)
 	       "WPCOPY   %12s%15s%15s\n"
 	       "      %15llu%15llu%15.3fms\n"
 	       "IRQ   %15s%15s%15s\n"
+	       "      %15llu%15llu%15.3fms\n"
+	       "SOFTIRQ  %12s%15s%15s\n"
 	       "      %15llu%15llu%15.3fms\n",
 	       "count", "real total", "virtual total",
 	       "delay total", "delay average",
@@ -245,7 +247,11 @@ static void print_delayacct(struct taskstats *t)
 	       "count", "delay total", "delay average",
 	       (unsigned long long)t->irq_count,
 	       (unsigned long long)t->irq_delay_total,
-	       average_ms((double)t->irq_delay_total, t->irq_count));
+	       average_ms((double)t->irq_delay_total, t->irq_count),
+	       "count", "delay total", "delay average",
+	       (unsigned long long)t->soft_count,
+	       (unsigned long long)t->soft_delay_total,
+	       average_ms((double)t->soft_delay_total, t->soft_count));
 }
 
 static void task_context_switch_counts(struct taskstats *t)
