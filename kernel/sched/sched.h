@@ -2932,8 +2932,10 @@ static inline void nohz_run_idle_balance(int cpu) { }
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
 struct irqtime {
 	u64			total;
+	u64			total_soft;
 	u64			tick_delta;
 	u64			irq_start_time;
+	u64			soft_start_time;
 	struct u64_stats_sync	sync;
 };
 
@@ -2956,6 +2958,20 @@ static inline u64 irq_time_read(int cpu)
 	} while (__u64_stats_fetch_retry(&irqtime->sync, seq));
 
 	return total;
+}
+
+static inline u64 irq_time_read_soft(int cpu)
+{
+	struct irqtime *irqtime = &per_cpu(cpu_irqtime, cpu);
+	unsigned int seq;
+	u64 total_soft;
+
+	do {
+		seq = __u64_stats_fetch_begin(&irqtime->sync);
+		total_soft = irqtime->total_soft;
+	} while (__u64_stats_fetch_retry(&irqtime->sync, seq));
+
+	return total_soft;
 }
 #endif /* CONFIG_IRQ_TIME_ACCOUNTING */
 
