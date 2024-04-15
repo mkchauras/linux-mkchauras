@@ -55,7 +55,7 @@ static struct class *cl; // Global variable for the device class
  */
 static struct folio *get_folio(unsigned long pfn)
 {
-	struct page *page = pfn_to_page(pfn);
+	struct page *page = pfn_to_online_page(pfn);
 	struct folio *folio;
 	if (!page || PageTail(page))
 		return NULL;
