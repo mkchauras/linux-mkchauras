@@ -16,15 +16,17 @@
 #include <linux/rmap.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/debugfs.h>
 
+#define DEBUGFS_DIR_NAME "at"
+#define DEBUGFS_FILE_NAME "at"
+
+static struct dentry *debugfs_dir;
+static struct dentry *debugfs_file;
+void add_string_to_list(const char *fmt, ...);
 void __exit address_translation_exit(void);
 int __init address_translation_init(void);
-#define NR_DEV 1
 extern struct list_head vmap_area_list;
-
-struct at_dev {
-	struct cdev c_dev;
-};
 
 struct task_data {
 	struct task_struct *task;
@@ -35,10 +37,51 @@ struct rwc_args {
 	unsigned long long addr_to_be_resolved;
 };
 
-static int *test;
-static dev_t first; // Global variable for the first device number
-static struct cdev c_dev; // Global variable for the character device structure
-static struct class *cl; // Global variable for the device class
+struct my_node {
+	struct list_head list;
+	char *data;
+};
+
+LIST_HEAD(read_data);
+
+// Function to add a formatted string to the linked list
+void add_string_to_list(const char *fmt, ...)
+{
+	va_list args;
+	struct my_node *new_node;
+	int len;
+
+	// Calculate the length of the formatted string
+	va_start(args, fmt);
+	len = vsnprintf(NULL, 0, fmt, args);
+	va_end(args);
+
+	if (len < 0) {
+		printk(KERN_ERR "Failed to get string length\n");
+		return;
+	}
+
+	new_node = kmalloc(sizeof(struct my_node), GFP_KERNEL);
+	if (!new_node) {
+		printk(KERN_ERR "Failed to allocate memory for new node\n");
+		return;
+	}
+
+	new_node->data = kmalloc(len + 1, GFP_KERNEL);
+	if (!new_node->data) {
+		printk(KERN_ERR "Failed to allocate memory for data\n");
+		kfree(new_node);
+		return;
+	}
+
+	// Format the string
+	va_start(args, fmt);
+	vsnprintf(new_node->data, len + 1, fmt, args);
+	va_end(args);
+	INIT_LIST_HEAD(&new_node->list);
+	list_add_tail(&new_node->list, &read_data);
+}
+
 /*
  * Code copied from Linux Kernel Source
  * Idle page tracking only considers user memory pages, for other types of
@@ -89,7 +132,6 @@ static unsigned long long get_physical_address(unsigned long virt_addr,
 	pgd = pgd_offset(task_mm, virt_addr);
 	if (pgd_none(*pgd))
 		printk(KERN_EMERG "No pgd");
-	printk(KERN_EMERG "pgd pointer: %p pgd entry:%p\n", task_mm->pgd, pgd);
 
 	p4d = p4d_offset(pgd, virt_addr);
 	if (p4d_none(*p4d))
@@ -116,25 +158,15 @@ static unsigned long long get_physical_address(unsigned long virt_addr,
 	return phys_addr;
 }
 
-static void print_address(void *addr, char *name)
-{
-	phys_addr_t phys_addr;
-	// TODO
-	phys_addr = virt_to_phys(addr);
-	pr_info("************* Symbol %s *************\n", name);
-	pr_info("Physical Address: 0x%llx\n", (unsigned long long)phys_addr);
-	pr_info("Virtual Address: 0x%llx\n", (unsigned long long)addr);
-}
-
 static int at_open(struct inode *inode, struct file *filp)
 {
-	pr_info("Device Open\n");
+	pr_info("Address translation Device Open\n");
 	return 0; /* success */
 }
 
 static int at_release(struct inode *inode, struct file *filp)
 {
-	pr_info("Device Close\n");
+	pr_info("Address translation Device Close\n");
 	return 0;
 }
 
@@ -148,10 +180,9 @@ static bool folio_data(struct folio *folio, struct vm_area_struct *vma,
 	unsigned int offset_within_page;
 	phys_addr_page_start = get_physical_address(page_start, task);
 	offset_within_page = data.addr_to_be_resolved - phys_addr_page_start;
-
-	pr_info("Virtual Address of 0x%llx is 0x%lx", data.addr_to_be_resolved,
-		address + offset_within_page);
-	pr_info("Task %s\n", task->comm);
+	add_string_to_list("Virtual Address of 0x%llx is 0x%lx with pid %d\n",
+			   data.addr_to_be_resolved,
+			   address + offset_within_page, task->pid);
 	return true;
 }
 
@@ -182,7 +213,7 @@ static bool analyse_vmalloc_memory(const unsigned long long addr)
 		pr_err("Physical address not mapped to KVA: 0x%llx\n", addr);
 		return false;
 	}
-	pr_info("VA start: 0x%lx\n", va->va_start);
+	add_string_to_list("VA start: 0x%lx\n", va->va_start);
 	return true;
 }
 
@@ -225,8 +256,40 @@ static ssize_t at_write(struct file *filp, const char __user *buf, size_t count,
 	return count;
 }
 
+static ssize_t at_read(struct file *file, char __user *buf, size_t count,
+		       loff_t *ppos)
+{
+	struct my_node *cur;
+	ssize_t bytes_to_copy;
+
+	if (list_empty(&read_data)) {
+		return 0;
+	}
+
+	cur = list_first_entry(&read_data, struct my_node, list);
+
+	if (!cur)
+		return 0; // No more data to read
+
+	bytes_to_copy = strlen(cur->data);
+
+	if (copy_to_user(buf, cur->data, strlen(cur->data))) {
+		return -EFAULT;
+	}
+
+	// Delete the node from the list and free memory
+	list_del(&cur->list);
+	kfree(cur->data);
+	kfree(cur);
+
+	*ppos += bytes_to_copy;
+
+	return bytes_to_copy;
+}
+
 static struct file_operations at_fops = {
 	.owner = THIS_MODULE,
+	.read = at_read,
 	.write = at_write,
 	.open = at_open,
 	.release = at_release,
@@ -234,44 +297,25 @@ static struct file_operations at_fops = {
 
 void __exit address_translation_exit(void)
 {
-	cdev_del(&c_dev);
-	device_destroy(cl, first);
-	class_destroy(cl);
-	unregister_chrdev_region(first, 1);
+	debugfs_remove_recursive(debugfs_dir);
 	pr_info("Address Translation Module Unloaded\n");
 }
 
 int __init address_translation_init(void)
 {
-	pr_info("Address Translation Module Loaded\n");
-	test = (int *)vmalloc(16507);
-	if (test == NULL) {
-		pr_err("Unable to allocate Memory\n");
-	} else {
-		pr_info("Memory address: 0x%px", test);
+	debugfs_dir = debugfs_create_dir(DEBUGFS_DIR_NAME, NULL);
+	if (!debugfs_dir) {
+		pr_err("Failed to create debugfs directory\n");
+		return -ENOMEM;
 	}
-	memset(test, 0, 16507);
-	if (alloc_chrdev_region(&first, 0, NR_DEV, "at_dev") < 0) {
-		return -1;
+
+	debugfs_file = debugfs_create_file(DEBUGFS_FILE_NAME, 0644, debugfs_dir,
+					   NULL, &at_fops);
+	if (!debugfs_file) {
+		pr_err("Failed to create debugfs file\n");
+		debugfs_remove_recursive(debugfs_dir);
+		return -ENOMEM;
 	}
-	if ((cl = class_create("at_dev")) == NULL) {
-		unregister_chrdev_region(first, 1);
-		return -1;
-	}
-	if (device_create(cl, NULL, first, NULL, "at") == NULL) {
-		class_destroy(cl);
-		unregister_chrdev_region(first, 1);
-		return -1;
-	}
-	cdev_init(&c_dev, &at_fops);
-	if (cdev_add(&c_dev, first, 1) == -1) {
-		device_destroy(cl, first);
-		class_destroy(cl);
-		unregister_chrdev_region(first, 1);
-		return -1;
-	}
-	print_address((void *)&address_translation_init, "init");
-	print_address((void *)&address_translation_exit, "exit");
 	return 0;
 }
 
