@@ -11,6 +11,7 @@ int __init at_test_init(void);
 void __exit at_test_exit(void);
 
 static int *test = NULL;
+static char *test_kmalloc = NULL;
 
 void __exit at_test_exit(void)
 {
@@ -24,12 +25,15 @@ int __init at_test_init(void)
 	int i;
 	pr_info("########### Address Translation Test Module Loaded ###########\n");
 	test = (int *)vmalloc(16507);
-	if (test == NULL) {
+	test_kmalloc = (char *)kmalloc(256, GFP_KERNEL);
+	if (test == NULL || test_kmalloc == NULL) {
 		pr_err("Unable to allocate Memory\n");
 	} else {
-		pr_info("Memory address: 0x%px\n", test);
+		pr_info("Memory address vmalloc: 0x%px\n", test);
+		pr_info("Memory address kmalloc: 0x%px\n", test_kmalloc);
 	}
 	memset(test, 0, 16507);
+	memset(test_kmalloc, 0, 256);
 	struct vmap_area *vma = find_vmap_area((unsigned long)test);
 	if (vma == NULL) {
 		pr_err("Unable to find vmap area\n");
