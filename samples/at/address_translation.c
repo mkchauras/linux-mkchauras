@@ -1,5 +1,7 @@
+#include "asm-generic/sections.h"
 #include "asm/page.h"
 #include "linux/ioport.h"
+#include "linux/kallsyms.h"
 #include "linux/list.h"
 #include "linux/mm_types.h"
 #include "linux/printk.h"
@@ -20,6 +22,11 @@
 #include <linux/version.h>
 #include <linux/debugfs.h>
 
+void reset_buffer(void);
+ssize_t dynamic_buffer_write(const char *fmt, ...);
+void __exit address_translation_exit(void);
+int __init address_translation_init(void);
+
 #define DEBUGFS_DIR_NAME "at"
 #define DEBUGFS_FILE_NAME "at"
 
@@ -27,9 +34,7 @@ extern struct resource iomem_resource;
 
 static struct dentry *debugfs_dir;
 static struct dentry *debugfs_file;
-void add_string_to_list(const char *fmt, ...);
-void __exit address_translation_exit(void);
-int __init address_translation_init(void);
+
 extern struct list_head vmap_area_list;
 
 struct task_data {
@@ -42,15 +47,10 @@ struct rwc_args {
 	int count;
 };
 
-struct my_node {
-	struct list_head list;
-	char *data;
-};
-
 struct addr_range {
 	char *name;
-	phys_addr_t start;
-	phys_addr_t end;
+	void* start;
+	void* end;
 };
 
 #define SEGMENT_CODE 0
@@ -64,13 +64,28 @@ struct kernel_segments {
 	struct addr_range seg[NR_SEGMENTS];
 } ksegm;
 
-LIST_HEAD(read_data);
+#define INITIAL_BUFFER_SIZE PAGE_SIZE
+#define EXPANSION_FACTOR 2
+#define CHUNK_SIZE 512
+#define DATA_HEADER \
+	"Mem Space,Physical Addr,Virtual Addr,pid/symbol/vmlinux segment,task name\n"
+#define DATA_HEADER_LEN 75
 
-// Function to add a formatted string to the linked list
-void add_string_to_list(const char *fmt, ...)
+static char *buffer;
+static size_t buffer_size = INITIAL_BUFFER_SIZE;
+static size_t data_size = 0;
+
+#define TEMP_BUFFER_SIZE 128
+static char *temp_buffer;
+static char *temp_buffer2;
+
+static int user_address_count = 0;
+ssize_t dynamic_buffer_write(const char *fmt, ...)
 {
+	size_t required_size;
+	size_t new_buffer_size;
+	char *new_buffer;
 	va_list args;
-	struct my_node *new_node;
 	int len;
 
 	// Calculate the length of the formatted string
@@ -79,29 +94,41 @@ void add_string_to_list(const char *fmt, ...)
 	va_end(args);
 
 	if (len < 0) {
-		printk(KERN_ERR "Failed to get string length\n");
-		return;
+		pr_err("Failed to get string length\n");
+		return -EINVAL;
+	}
+	/* Accounting the NULL termination */
+	len++;
+	required_size = data_size + len;
+	if (required_size > buffer_size) {
+		/* Expand the buffer */
+		new_buffer_size = buffer_size * EXPANSION_FACTOR;
+		while (required_size > new_buffer_size) {
+			new_buffer_size *= EXPANSION_FACTOR;
+		}
+		new_buffer = krealloc(buffer, new_buffer_size * sizeof(char),
+				      GFP_KERNEL);
+		if (!new_buffer) {
+			pr_err("Failed to reallocate memory for dynamic buffer\n");
+			return -ENOMEM;
+		}
+		buffer = new_buffer;
+		buffer_size = new_buffer_size;
 	}
 
-	new_node = kmalloc(sizeof(struct my_node), GFP_KERNEL);
-	if (!new_node) {
-		printk(KERN_ERR "Failed to allocate memory for new node\n");
-		return;
-	}
-
-	new_node->data = kmalloc(len + 1, GFP_KERNEL);
-	if (!new_node->data) {
-		printk(KERN_ERR "Failed to allocate memory for data\n");
-		kfree(new_node);
-		return;
-	}
-
-	// Format the string
+	/* Write data to the buffer */
 	va_start(args, fmt);
-	vsnprintf(new_node->data, len + 1, fmt, args);
+	vsnprintf(buffer + data_size, len, fmt, args);
 	va_end(args);
-	INIT_LIST_HEAD(&new_node->list);
-	list_add_tail(&new_node->list, &read_data);
+	data_size += len;
+
+	return len;
+}
+
+void reset_buffer(void)
+{
+	strncpy(buffer, DATA_HEADER, DATA_HEADER_LEN);
+	data_size = DATA_HEADER_LEN;
 }
 
 /*
@@ -153,27 +180,26 @@ static unsigned long long get_physical_address(unsigned long virt_addr,
 
 	pgd = pgd_offset(task_mm, virt_addr);
 	if (pgd_none(*pgd))
-		printk(KERN_EMERG "No pgd");
+		pr_emerg("No pgd");
 
 	p4d = p4d_offset(pgd, virt_addr);
 	if (p4d_none(*p4d))
-		printk(KERN_EMERG "No p4d");
+		pr_emerg("No p4d");
 
 	pud = pud_offset(p4d, virt_addr);
 	if (pud_none(*pud))
-		printk(KERN_EMERG "No pud");
+		pr_emerg("No pud");
 
 	pmd = pmd_offset(pud, virt_addr);
 	if (pmd_none(*pmd))
-		printk(KERN_EMERG "No pmd");
+		pr_emerg("No pmd");
 
 	pte = pte_offset_kernel(pmd, virt_addr);
 	if (pte_present(*pte)) {
 		page = pte_page(*pte);
 		offset_within_page = (virt_addr) & (PAGE_SIZE - 1);
 		phys_addr = page_to_phys(page) + offset_within_page;
-	} else
-		printk(KERN_EMERG "No pte present");
+	}
 	pte_unmap(pte);
 	// Release spin lock
 	spin_unlock(&(task_mm->page_table_lock));
@@ -184,32 +210,27 @@ static void store_kernel_address_range(struct resource *sys_ram)
 {
 	struct resource *iter = sys_ram;
 	while (iter) {
-		pr_info("Res: %s\n", iter->name);
 		if (!strncmp("Kernel code", iter->name, 11)) {
-			/* pr_info("Res: %s, start: %llx, end: %llx\n", iter->name, iter->start, iter->end); */
-			ksegm.seg[SEGMENT_CODE].start = iter->start;
-			ksegm.seg[SEGMENT_CODE].end = iter->end;
+			ksegm.seg[SEGMENT_CODE].start = _stext;
+			ksegm.seg[SEGMENT_CODE].end = _etext;
 			ksegm.seg[SEGMENT_CODE].name = "CODE";
 			goto next_res;
 		}
 		if (!strncmp("Kernel rodata", iter->name, 13)) {
-			/* pr_info("Res: %s, start: %llx, end: %llx\n", iter->name, iter->start, iter->end); */
-			ksegm.seg[SEGMENT_RODATA].start = iter->start;
-			ksegm.seg[SEGMENT_RODATA].end = iter->end;
+			ksegm.seg[SEGMENT_RODATA].start = __start_rodata;
+			ksegm.seg[SEGMENT_RODATA].end = __end_rodata;
 			ksegm.seg[SEGMENT_RODATA].name = "RODATA";
 			goto next_res;
 		}
 		if (!strncmp("Kernel data", iter->name, 11)) {
-			/* pr_info("Res: %s, start: %llx, end: %llx\n", iter->name, iter->start, iter->end); */
-			ksegm.seg[SEGMENT_DATA].start = iter->start;
-			ksegm.seg[SEGMENT_DATA].end = iter->end;
+			ksegm.seg[SEGMENT_DATA].start = _sdata;
+			ksegm.seg[SEGMENT_DATA].end = _edata;
 			ksegm.seg[SEGMENT_DATA].name = "DATA";
 			goto next_res;
 		}
 		if (!strncmp("Kernel bss", iter->name, 10)) {
-			/* pr_info("Res: %s, start: %llx, end: %llx\n", iter->name, iter->start, iter->end); */
-			ksegm.seg[SEGMENT_BSS].start = iter->start;
-			ksegm.seg[SEGMENT_BSS].end = iter->end;
+			ksegm.seg[SEGMENT_BSS].start = __bss_start;
+			ksegm.seg[SEGMENT_BSS].end = __bss_stop;
 			ksegm.seg[SEGMENT_BSS].name = "BSS";
 			goto next_res;
 		}
@@ -229,7 +250,6 @@ static void init_vmlinux_section(void)
 			goto next_res;
 		kernel_addr = resource->child;
 		if (kernel_addr) {
-			pr_info("Name: %s\n", kernel_addr->name);
 			if (strncmp("Kernel", kernel_addr->name, 6))
 				goto next_res;
 			found = true;
@@ -242,8 +262,6 @@ next_res:
 
 	for (int i = 0; i < NR_SEGMENTS; i++) {
 		adr = &ksegm.seg[i];
-		pr_info("%s:\tStart: %llx\tEnd: %llx\n", adr->name, adr->start,
-			adr->end);
 	}
 }
 
@@ -267,10 +285,11 @@ static bool folio_data(struct folio *folio, struct vm_area_struct *vma,
 	unsigned int offset_within_page;
 	phys_addr_page_start = get_physical_address(page_start, task);
 	offset_within_page = data.addr_to_be_resolved - phys_addr_page_start;
-	add_string_to_list("Virtual Address of 0x%llx is 0x%lx with pid %d\n",
-			   data.addr_to_be_resolved,
-			   address + offset_within_page, task->pid);
-	data.count++;
+	dynamic_buffer_write("User Space,0x%llx,0x%lx,%d,%s\n",
+			     data.addr_to_be_resolved,
+			     address + offset_within_page, task->pid,
+			     task->comm);
+	user_address_count++;
 	return true;
 }
 
@@ -300,18 +319,41 @@ static bool analyse_vmalloc_memory(const unsigned long long addr)
 	if (!found)
 		return false;
 
-	add_string_to_list("VA start: 0x%lx allocated by symbol %pS\n",
-			   va->va_start,
-			   va->vm->caller ? va->vm->caller : "NA");
+	dynamic_buffer_write("vmalloc space,0x%llx,0x%lx,%pS,kernel\n", addr,
+			     va->va_start,
+			     va->vm->caller ? va->vm->caller : "NA");
 	return true;
 }
 
-static bool analyse_vmlinux_section(const unsigned long long addr)
+static bool analyse_kernel_symbols(const unsigned long long paddr)
 {
+	unsigned long symbolsize;
+	unsigned long offset;
+	char *modname;
+	char *namebuf = temp_buffer;
+	const char *ret;
+	unsigned long long addr = (unsigned long long)__va(paddr);
+	pr_info("Virt: 0x%llx\n", addr);
+	pr_info("phy: 0x%llx\n", paddr);
+	ret = kallsyms_lookup(addr, &symbolsize, &offset, &modname, namebuf);
+
+	if (ret) {
+		dynamic_buffer_write(
+			"kernel symbol,0x%llx,0x%llx,%s+0x%lx/0x%lx,%s\n", paddr,
+			addr, namebuf, offset, symbolsize,
+			modname ? modname : "kernel");
+		return true;
+	}
+	return false;
+}
+
+static bool analyse_vmlinux_section(const unsigned long long paddr)
+{
+	void* addr = phys_to_virt(paddr);
 	for (int i = 0; i < NR_SEGMENTS; i++) {
 		if (ksegm.seg[i].start <= addr && addr <= ksegm.seg[i].end) {
-			add_string_to_list(
-				"Address 0x%lx belongs to vmlinux segment %s\n",
+			dynamic_buffer_write(
+				"vmlinux,0x%llx,0x%llx,%s,vmlinux\n", paddr,
 				addr, ksegm.seg[i].name);
 			return true;
 		}
@@ -333,33 +375,44 @@ static void analyse_physical_address(const unsigned long long addr)
 		data.count = 0;
 		rmap_walk(folio, &rwc);
 	}
-
-	if (data.count > 0)
+	if (user_address_count > 0){
+		user_address_count = 0;
 		return;
-	pr_err("Physical address 0x%llx not mapped to any user task\n", addr);
+	}
 
 	if (analyse_vmalloc_memory(addr))
 		return;
-	pr_err("Physical address 0x%llx not mapped to vmalloc space\n", addr);
+	pr_debug("Physical address 0x%llx not mapped to vmalloc space\n", addr);
+
+	if (analyse_kernel_symbols(addr))
+		return;
 
 	if (analyse_vmlinux_section(addr))
 		return;
-	pr_err("Physical address 0x%llx not mapped to vmlinux\n", addr);
+	pr_debug("Physical address 0x%llx not mapped to vmlinux\n", addr);
+	dynamic_buffer_write("NA,0x%llx,,,,\n", addr);
 }
 
 static ssize_t at_write(struct file *filp, const char __user *buf, size_t count,
 			loff_t *f_pos)
 {
-	char *data = (char *)kmalloc(4096, GFP_KERNEL);
+	char *data = temp_buffer;
 	unsigned long long addr;
-	memset(data, 0, 4096);
+	count = min(count, TEMP_BUFFER_SIZE - 1);
+
 	if (copy_from_user(data, buf, count))
 		return -EFAULT;
+	data[count] = '\0';
+
+	if (count == 1 && data[0] == 0x0A) {
+		reset_buffer();
+		return count;
+	}
 	if (kstrtoull(data, 16, &addr)) {
 		pr_warn("invalid address '%s'\n", data);
 		return -EFAULT;
 	}
-	pr_info("Device Wrote %lu bytes: 0x%llX", count, addr);
+	pr_debug("Device Wrote %lu bytes: 0x%llX", count, addr);
 	analyse_physical_address(addr);
 	return count;
 }
@@ -367,32 +420,22 @@ static ssize_t at_write(struct file *filp, const char __user *buf, size_t count,
 static ssize_t at_read(struct file *file, char __user *buf, size_t count,
 		       loff_t *ppos)
 {
-	struct my_node *cur;
-	ssize_t bytes_to_copy;
+	size_t bytes_to_read;
+	loff_t read_offset = *ppos;
 
-	if (list_empty(&read_data)) {
+	if (read_offset >= data_size) {
 		return 0;
 	}
 
-	cur = list_first_entry(&read_data, struct my_node, list);
+	bytes_to_read = min(count, data_size - read_offset);
+	bytes_to_read = min(bytes_to_read, CHUNK_SIZE);
 
-	if (!cur)
-		return 0; // No more data to read
-
-	bytes_to_copy = strlen(cur->data);
-
-	if (copy_to_user(buf, cur->data, strlen(cur->data))) {
+	if (copy_to_user(buf, buffer + read_offset, bytes_to_read)) {
+		pr_err("Failed to copy data to user space\n");
 		return -EFAULT;
 	}
-
-	// Delete the node from the list and free memory
-	list_del(&cur->list);
-	kfree(cur->data);
-	kfree(cur);
-
-	*ppos += bytes_to_copy;
-
-	return bytes_to_copy;
+	*ppos += bytes_to_read;
+	return bytes_to_read;
 }
 
 static struct file_operations at_fops = {
@@ -406,6 +449,8 @@ static struct file_operations at_fops = {
 void __exit address_translation_exit(void)
 {
 	debugfs_remove_recursive(debugfs_dir);
+	kfree(buffer);
+	kfree(temp_buffer);
 	pr_info("Address Translation Module Unloaded\n");
 }
 
@@ -424,10 +469,35 @@ int __init address_translation_init(void)
 		debugfs_remove_recursive(debugfs_dir);
 		return -ENOMEM;
 	}
-	pr_info("Address of init %lx\n", __pa(address_translation_init));
-	pr_info("Address of exit %lx\n", __pa(address_translation_exit));
-	pr_info("Address of schedule %lx\n", __pa(schedule));
+	buffer = kmalloc(INITIAL_BUFFER_SIZE, GFP_KERNEL);
+	if (!buffer) {
+		pr_err("Failed to allocate memory for dynamic buffer\n");
+		return -ENOMEM;
+	}
+	temp_buffer = kmalloc(TEMP_BUFFER_SIZE, GFP_KERNEL);
+	if (!temp_buffer) {
+		pr_err("Failed to allocate memory for temporary buffer\n");
+		return -ENOMEM;
+	}
+	temp_buffer2 = kmalloc(TEMP_BUFFER_SIZE, GFP_KERNEL);
+	if (!temp_buffer2) {
+		pr_err("Failed to allocate memory for temporary buffer\n");
+		return -ENOMEM;
+	}
+	reset_buffer();
+	pr_info("Virtual Address of init %llx\n",
+		(unsigned long long)address_translation_init);
+
 	init_vmlinux_section();
+
+	/* pr_info("Address of init %lx\n", __pa_symbol(address_translation_init)); */
+	/* pr_info("Virtual Address of init %llx\n", */
+	/* 	__va(__pa_symbol(address_translation_init))); */
+	/* /\* pr_info("Address of exit %lx\n", __pa(address_translation_exit)); *\/ */
+	printk(KERN_INFO "CODE\t%px - %px\n", _stext, _etext);
+	printk(KERN_INFO "DATA\t%px - %px\n", _sdata, _edata);
+	printk(KERN_INFO "RODATA\t%px - %px\n", __start_rodata, __end_rodata);
+	printk(KERN_INFO "BSS\t%px - %px\n", __bss_start, __bss_stop);
 	return 0;
 }
 
