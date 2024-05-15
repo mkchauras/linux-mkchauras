@@ -10,6 +10,8 @@
  * (C) 2011 Linux Foundation, Christoph Lameter
  */
 
+#include "linux/export.h"
+#include "linux/printk.h"
 #include <linux/mm.h>
 #include <linux/swap.h> /* mm_account_reclaimed_pages() */
 #include <linux/module.h>
@@ -874,6 +876,11 @@ static struct track *get_track(struct kmem_cache *s, void *object,
 
 	return kasan_reset_tag(p + alloc);
 }
+
+unsigned long get_track_alloc(struct kmem_cache *s, void *object) {
+	return get_track(s, object, TRACK_ALLOC)->addr;
+}
+EXPORT_SYMBOL_GPL(get_track_alloc);
 
 #ifdef CONFIG_STACKDEPOT
 static noinline depot_stack_handle_t set_track_prepare(void)

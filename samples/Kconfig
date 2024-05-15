@@ -71,6 +71,8 @@ config SAMPLE_KOBJECT
 
 config SAMPLE_AT
        tristate "Build Address Translation Module"
+       depends on SLUB_DEBUG
+       depends on MEMCG
        help
 	  This config option enable AT module
 

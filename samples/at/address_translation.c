@@ -4,9 +4,11 @@
 #include "linux/kallsyms.h"
 #include "linux/list.h"
 #include "linux/mm_types.h"
+#include "linux/pfn.h"
 #include "linux/printk.h"
 #include "linux/sched.h"
 #include "linux/vmalloc.h"
+#include "../mm/slab.h"
 #include <asm-generic/errno-base.h>
 #include <asm/io.h>
 #include <linux/cdev.h>
@@ -24,9 +26,10 @@
 
 void reset_buffer(void);
 ssize_t dynamic_buffer_write(const char *fmt, ...);
-void __exit address_translation_exit(void);
-int __init address_translation_init(void);
+void __exit at_exit(void);
+int __init at_init(void);
 
+struct slab *get_slab(void *p);
 #define DEBUGFS_DIR_NAME "at"
 #define DEBUGFS_FILE_NAME "at"
 
@@ -49,8 +52,8 @@ struct rwc_args {
 
 struct addr_range {
 	char *name;
-	void* start;
-	void* end;
+	void *start;
+	void *end;
 };
 
 #define SEGMENT_CODE 0
@@ -77,7 +80,6 @@ static size_t data_size = 0;
 
 #define TEMP_BUFFER_SIZE 128
 static char *temp_buffer;
-static char *temp_buffer2;
 
 static int user_address_count = 0;
 ssize_t dynamic_buffer_write(const char *fmt, ...)
@@ -125,6 +127,19 @@ ssize_t dynamic_buffer_write(const char *fmt, ...)
 	return len;
 }
 
+struct slab *get_slab(void *p)
+{
+	struct folio *folio;
+	struct slab *slab;
+
+	if (!p)
+		return NULL;
+
+	folio = virt_to_folio(p);
+	slab = folio_slab(folio);
+	return slab;
+}
+
 void reset_buffer(void)
 {
 	strncpy(buffer, DATA_HEADER, DATA_HEADER_LEN);
@@ -160,7 +175,9 @@ static struct folio *get_folio(unsigned long pfn)
 	}
 	return folio;
 }
-
+/*
+ * TODO Handle Compound Page
+ */
 static unsigned long long get_physical_address(unsigned long virt_addr,
 					       struct task_struct *task)
 {
@@ -201,6 +218,8 @@ static unsigned long long get_physical_address(unsigned long virt_addr,
 		phys_addr = page_to_phys(page) + offset_within_page;
 	}
 	pte_unmap(pte);
+
+done:
 	// Release spin lock
 	spin_unlock(&(task_mm->page_table_lock));
 	return phys_addr;
@@ -219,7 +238,7 @@ static void store_kernel_address_range(struct resource *sys_ram)
 		if (!strncmp("Kernel rodata", iter->name, 13)) {
 			ksegm.seg[SEGMENT_RODATA].start = __start_rodata;
 			ksegm.seg[SEGMENT_RODATA].end = __end_rodata;
-			ksegm.seg[SEGMENT_RODATA].name = "RODATA";
+			ksegm.seg[1].name = "RODATA";
 			goto next_res;
 		}
 		if (!strncmp("Kernel data", iter->name, 11)) {
@@ -276,50 +295,91 @@ static int at_release(struct inode *inode, struct file *filp)
 }
 
 static bool folio_data(struct folio *folio, struct vm_area_struct *vma,
-		       unsigned long address, void *arg)
+		       unsigned long v_address, void *arg)
 {
 	struct task_struct *task = vma->vm_mm->owner;
 	struct rwc_args data = *(struct rwc_args *)arg;
-	unsigned long page_start = address;
+	unsigned long page_start = v_address;
 	unsigned long long phys_addr_page_start;
 	unsigned int offset_within_page;
 	phys_addr_page_start = get_physical_address(page_start, task);
 	offset_within_page = data.addr_to_be_resolved - phys_addr_page_start;
 	dynamic_buffer_write("User Space,0x%llx,0x%lx,%d,%s\n",
 			     data.addr_to_be_resolved,
-			     address + offset_within_page, task->pid,
+			     v_address + offset_within_page, task->pid,
 			     task->comm);
 	user_address_count++;
 	return true;
 }
 
-static bool analyse_vmalloc_memory(const unsigned long long addr)
+/*
+ * TODO Get offset to memory in this
+ */
+static bool analyse_kmalloc_memory(const phys_addr_t addr)
 {
-	struct vmap_area *va;
+	unsigned long caller;
+	const char *ret;
+	unsigned long symbolsize;
+	unsigned long offset;
+	char *modname;
+	char *namebuf = temp_buffer;
+	void *object = phys_to_virt(addr);
+	struct slab *slab;
+	struct kmem_cache *s;
+	struct folio *folio;
+	struct page *page = pfn_to_online_page(PHYS_PFN(addr));
+	if (!page || PageTail(page))
+		return NULL;
+	folio = page_folio(page);
+
+	if (!folio)
+		return false;
+	if (!folio_test_slab(folio))
+		return false;
+
+	slab = folio_slab(folio);
+	if (!slab)
+		return false;
+	s = slab->slab_cache;
+	object = nearest_obj(s, slab, object);
+	caller = get_track_alloc(s, object);
+	ret = kallsyms_lookup(caller, &symbolsize, &offset, &modname, namebuf);
+	if (ret) {
+		dynamic_buffer_write(
+			"kmalloc,0x%llx,0x%llx,%s+0x%lx/0x%lx,%s\n", addr,
+			(unsigned long long)object, namebuf, offset, symbolsize,
+			modname ? modname : "kernel");
+		return true;
+	}
+	return false;
+}
+
+static bool analyse_vmalloc_memory(const phys_addr_t phys_addr)
+{
 	bool found = false;
-	void *start, *end;
-	int nr_pages;
-	/*
-	 * This means that the memory doesn't belongs to User Space
-	 * Let's check for kernel space before actually throwing an error
-	 */
+	void *vaddr;
+	unsigned long paddr;
+	struct vmap_area *va;
+	struct vm_struct *vm;
+	struct page *page;
+
 	list_for_each_entry(va, &vmap_area_list, list) {
-		nr_pages = va->vm->nr_pages;
-		if (nr_pages <= 0)
-			continue;
-		start = page_address(va->vm->pages[0]);
-		end = page_address(va->vm->pages[va->vm->nr_pages - 1]) +
-		      PAGE_SIZE;
-		if (addr >= (unsigned long long)start &&
-		    addr < (unsigned long long)end) {
-			found = true;
-			break;
+		vm = va->vm;
+		for(vaddr = vm->addr; vaddr < vm->addr + vm->size; vaddr += PAGE_SIZE) {
+			page = vmalloc_to_page(vaddr);
+			if(!page)
+				continue;
+			paddr = page_to_phys(page);
+			if(phys_addr >= paddr && phys_addr < paddr + PAGE_SIZE) {
+				found = true;
+				goto done;
+			}
 		}
 	}
 	if (!found)
 		return false;
-
-	dynamic_buffer_write("vmalloc space,0x%llx,0x%lx,%pS,kernel\n", addr,
+done:
+	dynamic_buffer_write("vmalloc space,0x%llx,0x%lx,%pS,kernel\n", phys_addr,
 			     va->va_start,
 			     va->vm->caller ? va->vm->caller : "NA");
 	return true;
@@ -332,15 +392,13 @@ static bool analyse_kernel_symbols(const unsigned long long paddr)
 	char *modname;
 	char *namebuf = temp_buffer;
 	const char *ret;
-	unsigned long long addr = (unsigned long long)__va(paddr);
-	pr_info("Virt: 0x%llx\n", addr);
-	pr_info("phy: 0x%llx\n", paddr);
+	unsigned long long addr = (unsigned long long)phys_to_virt(paddr);
 	ret = kallsyms_lookup(addr, &symbolsize, &offset, &modname, namebuf);
 
 	if (ret) {
 		dynamic_buffer_write(
-			"kernel symbol,0x%llx,0x%llx,%s+0x%lx/0x%lx,%s\n", paddr,
-			addr, namebuf, offset, symbolsize,
+			"kernel symbol,0x%llx,0x%llx,%s+0x%lx/0x%lx,%s\n",
+			paddr, addr, namebuf, offset, symbolsize,
 			modname ? modname : "kernel");
 		return true;
 	}
@@ -349,7 +407,7 @@ static bool analyse_kernel_symbols(const unsigned long long paddr)
 
 static bool analyse_vmlinux_section(const unsigned long long paddr)
 {
-	void* addr = phys_to_virt(paddr);
+	void *addr = phys_to_virt(paddr);
 	for (int i = 0; i < NR_SEGMENTS; i++) {
 		if (ksegm.seg[i].start <= addr && addr <= ksegm.seg[i].end) {
 			dynamic_buffer_write(
@@ -375,21 +433,23 @@ static void analyse_physical_address(const unsigned long long addr)
 		data.count = 0;
 		rmap_walk(folio, &rwc);
 	}
-	if (user_address_count > 0){
+	if (user_address_count > 0) {
 		user_address_count = 0;
 		return;
 	}
 
-	if (analyse_vmalloc_memory(addr))
+	if (analyse_kmalloc_memory(addr))
 		return;
-	pr_debug("Physical address 0x%llx not mapped to vmalloc space\n", addr);
 
 	if (analyse_kernel_symbols(addr))
 		return;
 
 	if (analyse_vmlinux_section(addr))
 		return;
-	pr_debug("Physical address 0x%llx not mapped to vmlinux\n", addr);
+
+	if (analyse_vmalloc_memory(addr))
+		return;
+
 	dynamic_buffer_write("NA,0x%llx,,,,\n", addr);
 }
 
@@ -446,7 +506,7 @@ static struct file_operations at_fops = {
 	.release = at_release,
 };
 
-void __exit address_translation_exit(void)
+void __exit at_exit(void)
 {
 	debugfs_remove_recursive(debugfs_dir);
 	kfree(buffer);
@@ -454,7 +514,7 @@ void __exit address_translation_exit(void)
 	pr_info("Address Translation Module Unloaded\n");
 }
 
-int __init address_translation_init(void)
+int __init at_init(void)
 {
 	debugfs_dir = debugfs_create_dir(DEBUGFS_DIR_NAME, NULL);
 	if (!debugfs_dir) {
@@ -479,21 +539,16 @@ int __init address_translation_init(void)
 		pr_err("Failed to allocate memory for temporary buffer\n");
 		return -ENOMEM;
 	}
-	temp_buffer2 = kmalloc(TEMP_BUFFER_SIZE, GFP_KERNEL);
-	if (!temp_buffer2) {
-		pr_err("Failed to allocate memory for temporary buffer\n");
-		return -ENOMEM;
-	}
 	reset_buffer();
-	pr_info("Virtual Address of init %llx\n",
-		(unsigned long long)address_translation_init);
+	pr_info("Virtual Address of init %llx\n", (unsigned long long)at_init);
+	pr_info("Virtual Address of temp_buffer 0x%px\n", temp_buffer);
+	pr_info("Phy Address of temp_buffer 0x%llx\n",
+		virt_to_phys(temp_buffer));
+	pr_info("Virtual addr after Cnversion of temp_buffer 0x%px\n",
+		phys_to_virt(virt_to_phys(temp_buffer)));
 
 	init_vmlinux_section();
-
-	/* pr_info("Address of init %lx\n", __pa_symbol(address_translation_init)); */
-	/* pr_info("Virtual Address of init %llx\n", */
-	/* 	__va(__pa_symbol(address_translation_init))); */
-	/* /\* pr_info("Address of exit %lx\n", __pa(address_translation_exit)); *\/ */
+	analyse_kmalloc_memory(__pa(temp_buffer));
 	printk(KERN_INFO "CODE\t%px - %px\n", _stext, _etext);
 	printk(KERN_INFO "DATA\t%px - %px\n", _sdata, _edata);
 	printk(KERN_INFO "RODATA\t%px - %px\n", __start_rodata, __end_rodata);
@@ -501,8 +556,8 @@ int __init address_translation_init(void)
 	return 0;
 }
 
-module_init(address_translation_init);
-module_exit(address_translation_exit);
+module_init(at_init);
+module_exit(at_exit);
 
 MODULE_AUTHOR("Mukesh Kumar Chaurasiya");
 MODULE_DESCRIPTION("Address Translation Module");
