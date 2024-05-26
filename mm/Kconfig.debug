@@ -276,3 +276,15 @@ config PER_VMA_LOCK_STATS
 	  overhead in the page fault path.
 
 	  If in doubt, say N.
+
+config DEBUG_PHYS_ADDR
+	bool "Enable physical address debug info to track it's user"
+	default n
+	depends on SLUB_DEBUG
+	help
+	  This enable a debugfs file debug_phys_addr. For this to work, slub
+	  debug should be on. When enabled, debug_phys_addr file will be
+	  created under debugfs. Writing a physical address in hex to this file
+	  will store the mapped virtual address along with the memory user
+	  information in a csv format. The buffer used to store the data is
+	  dynamically expanded when required. 
