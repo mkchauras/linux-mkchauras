@@ -3,6 +3,8 @@
 #include "linux/gfp_types.h"
 #include <linux/debugfs.h>
 #include <linux/string.h>
+#include <linux/mm.h>
+#include <linux/rmap.h>
 
 #define INITIAL_BUFFER_SIZE PAGE_SIZE
 #define EXPANSION_FACTOR 2
@@ -15,6 +17,7 @@
 static char *buffer;
 static size_t buffer_size = INITIAL_BUFFER_SIZE;
 static size_t data_size;
+static int user_address_count;
 
 static int __init debug_phys_addr_init(void);
 
@@ -77,11 +80,64 @@ static int reset_buffer(void)
 	return 0;
 }
 
+static struct folio *get_folio(unsigned long pfn)
+{
+	struct page *page = pfn_to_online_page(pfn);
+	struct folio *folio;
+
+	if (!page || PageTail(page))
+		return NULL;
+	folio = page_folio(page);
+	if (!folio_test_lru(folio) || !folio_try_get(folio))
+		return NULL;
+	if (unlikely(page_folio(page) != folio || !folio_test_lru(folio))) {
+		folio_put(folio);
+		folio = NULL;
+	}
+	return folio;
+}
+
+static bool folio_data(struct folio *folio, struct vm_area_struct *vma,
+		       unsigned long v_address, void *arg)
+{
+	struct task_struct *task = vma->vm_mm->owner;
+	unsigned long long addr_to_resolve = *(unsigned long long *)arg;
+	unsigned int offset_within_page = offset_in_page(addr_to_resolve);
+
+	dynamic_buffer_write("Process,0x%llx,0x%lx,%d,%s\n", addr_to_resolve,
+			     v_address + offset_within_page, task->pid,
+			     task->comm);
+	user_address_count++;
+	return true;
+}
+
+static void analyse_physical_address(const unsigned long long addr)
+{
+	unsigned long long data = addr;
+	struct folio *folio = get_folio(PHYS_PFN(addr));
+	struct rmap_walk_control rwc = {
+		.rmap_one = folio_data,
+		.arg = (void *)&data,
+	};
+
+	if (folio != NULL)
+		rmap_walk(folio, &rwc);
+
+	if (user_address_count > 0) {
+		user_address_count = 0;
+		return;
+	}
+
+	/* Insert Blank Entry */
+	dynamic_buffer_write("NA,0x%llx,,,,\n", addr);
+}
+
 static ssize_t debug_phys_addr_write(struct file *filp, const char __user *buf,
 				     size_t count, loff_t *f_pos)
 {
 	char *temp_buf;
 	int ret = count;
+	unsigned long long addr;
 
 	count = min(count, TEMP_BUFFER_SIZE - 1);
 	temp_buf = kmalloc(TEMP_BUFFER_SIZE, GFP_KERNEL);
@@ -96,6 +152,12 @@ static ssize_t debug_phys_addr_write(struct file *filp, const char __user *buf,
 		reset_buffer();
 		goto exit;
 	}
+	if (kstrtoull(temp_buf, 16, &addr)) {
+		pr_warn("invalid address '%s'\n", temp_buf);
+		ret = -EFAULT;
+		goto exit;
+	}
+	analyse_physical_address(addr);
 exit:
 	kfree(temp_buf);
 	return ret;
