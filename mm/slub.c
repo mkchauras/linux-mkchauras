@@ -879,6 +879,17 @@ static struct track *get_track(struct kmem_cache *s, void *object,
 	return kasan_reset_tag(p + alloc);
 }
 
+#ifdef CONFIG_DEBUG_PHYS_ADDR
+inline unsigned long get_track_alloc(struct kmem_cache *s, void *object)
+{
+	struct track *track = get_track(s, object, TRACK_ALLOC);
+
+	if (track)
+		return track->addr;
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_STACKDEPOT
 static noinline depot_stack_handle_t set_track_prepare(void)
 {

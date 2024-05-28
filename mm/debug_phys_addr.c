@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "linux/gfp_types.h"
+#include "slab.h"
 #include <linux/debugfs.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/rmap.h>
+#include <linux/io.h>
+#include <linux/kallsyms.h>
 
 #define INITIAL_BUFFER_SIZE PAGE_SIZE
 #define EXPANSION_FACTOR 2
-#define TEMP_BUFFER_SIZE 256
+#define TEMP_BUFFER_SIZE 1024
 
 #define DATA_HEADER \
 	"Mem Space,Physical Addr,Virtual Addr,pid/symbol/vmlinux segment,task name\n"
@@ -111,7 +114,49 @@ static bool folio_data(struct folio *folio, struct vm_area_struct *vma,
 	return true;
 }
 
-static void analyse_physical_address(const unsigned long long addr)
+static bool analyse_kmalloc_memory(char *temp_buf, const phys_addr_t addr)
+{
+	unsigned long caller;
+	const char *sym_ret;
+	unsigned long symbolsize;
+	unsigned long offset;
+	char *modname;
+	char *namebuf = temp_buf;
+	void *object = phys_to_virt(addr);
+	struct slab *slab;
+	struct kmem_cache *s;
+	struct folio *folio;
+	struct page *page = pfn_to_online_page(PHYS_PFN(addr));
+
+	if (!page || PageTail(page))
+		return false;
+	folio = page_folio(page);
+
+	if (!folio)
+		return false;
+	if (!folio_test_slab(folio))
+		return false;
+
+	slab = folio_slab(folio);
+	if (!slab)
+		return false;
+	s = slab->slab_cache;
+	object = nearest_obj(s, slab, object);
+	caller = get_track_alloc(s, object);
+	sym_ret = kallsyms_lookup(caller, &symbolsize, &offset, &modname,
+				  namebuf);
+	if (sym_ret) {
+		dynamic_buffer_write(
+			"kmalloc,0x%llx,0x%llx,%s+0x%lx/0x%lx,%s\n", addr,
+			(unsigned long long)object, namebuf, offset, symbolsize,
+			modname ? modname : "kernel");
+		return true;
+	}
+	return false;
+}
+
+static void analyse_physical_address(char *temp_buf,
+				     const unsigned long long addr)
 {
 	unsigned long long data = addr;
 	struct folio *folio = get_folio(PHYS_PFN(addr));
@@ -127,6 +172,9 @@ static void analyse_physical_address(const unsigned long long addr)
 		user_address_count = 0;
 		return;
 	}
+
+	if (analyse_kmalloc_memory(temp_buf, addr))
+		return;
 
 	/* Insert Blank Entry */
 	dynamic_buffer_write("NA,0x%llx,,,,\n", addr);
@@ -157,7 +205,7 @@ static ssize_t debug_phys_addr_write(struct file *filp, const char __user *buf,
 		ret = -EFAULT;
 		goto exit;
 	}
-	analyse_physical_address(addr);
+	analyse_physical_address(temp_buf, addr);
 exit:
 	kfree(temp_buf);
 	return ret;

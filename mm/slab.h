@@ -680,4 +680,8 @@ void __check_heap_object(const void *ptr, unsigned long n,
 void skip_orig_size_check(struct kmem_cache *s, const void *object);
 #endif
 
+#ifdef CONFIG_DEBUG_PHYS_ADDR
+inline unsigned long get_track_alloc(struct kmem_cache *s, void *object);
+#endif
+
 #endif /* MM_SLAB_H */
