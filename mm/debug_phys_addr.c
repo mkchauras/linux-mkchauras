@@ -8,6 +8,7 @@
 #include <linux/rmap.h>
 #include <linux/io.h>
 #include <linux/kallsyms.h>
+#include <linux/vmalloc.h>
 
 #define INITIAL_BUFFER_SIZE PAGE_SIZE
 #define EXPANSION_FACTOR 2
@@ -176,6 +177,18 @@ static bool analyse_kernel_symbols(char *temp_buf,
 	return false;
 }
 
+static bool analyse_vmalloc_memory(const phys_addr_t phys_addr)
+{
+	struct vmap_area *va = get_vmap_area(phys_addr);
+
+	if (!va)
+		return false;
+	dynamic_buffer_write("vmalloc,0x%llx,0x%lx,%pS,kernel\n", phys_addr,
+			     va->va_start,
+			     va->vm->caller ? va->vm->caller : "NA");
+	return true;
+}
+
 static void analyse_physical_address(char *temp_buf,
 				     const unsigned long long addr)
 {
@@ -197,6 +210,8 @@ static void analyse_physical_address(char *temp_buf,
 	if (analyse_kmalloc_memory(temp_buf, addr))
 		return;
 	if (analyse_kernel_symbols(temp_buf, addr))
+		return;
+	if (analyse_vmalloc_memory(addr))
 		return;
 	/* Insert Blank Entry */
 	dynamic_buffer_write("NA,0x%llx,,,,\n", addr);

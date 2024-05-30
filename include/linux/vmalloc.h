@@ -329,4 +329,8 @@ bool vmalloc_dump_obj(void *object);
 static inline bool vmalloc_dump_obj(void *object) { return false; }
 #endif
 
+#ifdef CONFIG_DEBUG_PHYS_ADDR
+struct vmap_area *get_vmap_area(const phys_addr_t phys_addr);
+#endif
+
 #endif /* _LINUX_VMALLOC_H */

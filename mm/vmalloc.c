@@ -4865,6 +4865,52 @@ static void show_purge_info(struct seq_file *m)
 	}
 }
 
+#ifdef CONFIG_DEBUG_PHYS_ADDR
+
+static bool check_in_vm(struct vm_struct *vm, const phys_addr_t phys_addr)
+{
+	void *vaddr;
+	unsigned long paddr;
+	struct page *page;
+
+	for (vaddr = vm->addr; vaddr < vm->addr + vm->size;
+	     vaddr += PAGE_SIZE) {
+		page = vmalloc_to_page(vaddr);
+		if (!page)
+			continue;
+		paddr = page_to_phys(page);
+		if (phys_addr >= paddr && phys_addr < paddr + PAGE_SIZE)
+			return true;
+	}
+	return false;
+}
+
+struct vmap_area *get_vmap_area(const phys_addr_t phys_addr)
+{
+	struct vmap_node *vn;
+	struct vmap_area *va;
+	struct vm_struct *vm;
+	int i;
+
+	for (i = 0; i < nr_vmap_nodes; i++) {
+		vn = &vmap_nodes[i];
+
+		spin_lock(&vn->busy.lock);
+		list_for_each_entry(va, &vn->busy.head, list) {
+			if (!va->vm)
+				continue;
+			vm = va->vm;
+			if (check_in_vm(vm, phys_addr)) {
+				spin_unlock(&vn->busy.lock);
+				return va;
+			}
+		}
+		spin_unlock(&vn->busy.lock);
+	}
+	return NULL;
+}
+#endif
+
 static int vmalloc_info_show(struct seq_file *m, void *p)
 {
 	struct vmap_node *vn;
