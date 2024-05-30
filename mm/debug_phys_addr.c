@@ -155,6 +155,27 @@ static bool analyse_kmalloc_memory(char *temp_buf, const phys_addr_t addr)
 	return false;
 }
 
+static bool analyse_kernel_symbols(char *temp_buf,
+				   const unsigned long long paddr)
+{
+	unsigned long symbolsize;
+	unsigned long offset;
+	char *modname;
+	char *namebuf = temp_buf;
+	const char *ret;
+	unsigned long long addr = (unsigned long long)__va_symbol(paddr);
+
+	ret = kallsyms_lookup(addr, &symbolsize, &offset, &modname, namebuf);
+	if (ret) {
+		dynamic_buffer_write(
+			"kernel symbol,0x%llx,0x%llx,%s+0x%lx/0x%lx,%s\n",
+			paddr, addr, namebuf, offset, symbolsize,
+			modname ? modname : "kernel");
+		return true;
+	}
+	return false;
+}
+
 static void analyse_physical_address(char *temp_buf,
 				     const unsigned long long addr)
 {
@@ -175,7 +196,8 @@ static void analyse_physical_address(char *temp_buf,
 
 	if (analyse_kmalloc_memory(temp_buf, addr))
 		return;
-
+	if (analyse_kernel_symbols(temp_buf, addr))
+		return;
 	/* Insert Blank Entry */
 	dynamic_buffer_write("NA,0x%llx,,,,\n", addr);
 }

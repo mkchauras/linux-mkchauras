@@ -35,6 +35,8 @@ extern unsigned long __phys_addr_symbol(unsigned long);
 #define __phys_addr(x)		__phys_addr_nodebug(x)
 #define __phys_addr_symbol(x) \
 	((unsigned long)(x) - __START_KERNEL_map + phys_base)
+#define __virt_addr_symbol(x) \
+	(x + __START_KERNEL_map - phys_base)
 #endif
 
 #define __phys_reloc_hide(x)	(x)

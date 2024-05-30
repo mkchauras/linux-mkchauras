@@ -58,6 +58,9 @@ static inline void copy_user_page(void *to, void *from, unsigned long vaddr,
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
 #endif
 
+#define __va_symbol(x) \
+	__virt_addr_symbol(x)
+
 #define __boot_va(x)		__va(x)
 #define __boot_pa(x)		__pa(x)
 
