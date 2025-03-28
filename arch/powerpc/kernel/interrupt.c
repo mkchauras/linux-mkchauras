@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <linux/context_tracking.h>
+#include <linux/entry-common.h>
 #include <linux/err.h>
 #include <linux/compat.h>
 #include <linux/rseq.h>
@@ -164,17 +165,12 @@ notrace unsigned long syscall_exit_prepare(unsigned long r3,
 					   long scv)
 {
 	unsigned long ti_flags;
-	unsigned long ret = 0;
 	bool is_not_scv = !IS_ENABLED(CONFIG_PPC_BOOK3S_64) || !scv;
-
-	CT_WARN_ON(ct_state() == CT_STATE_USER);
 
 	kuap_assert_locked();
 
 	regs->result = r3;
-
-	/* Check whether the syscall is issued inside a restartable sequence */
-	rseq_syscall(regs);
+	regs->exit_flags = 0;
 
 	ti_flags = read_thread_flags();
 
@@ -187,7 +183,7 @@ notrace unsigned long syscall_exit_prepare(unsigned long r3,
 
 	if (unlikely(ti_flags & _TIF_PERSYSCALL_MASK)) {
 		if (ti_flags & _TIF_RESTOREALL)
-			ret = _TIF_RESTOREALL;
+			regs->exit_flags = _TIF_RESTOREALL;
 		else
 			regs->gpr[3] = r3;
 		clear_bits(_TIF_PERSYSCALL_MASK, &current_thread_info()->flags);
@@ -196,18 +192,28 @@ notrace unsigned long syscall_exit_prepare(unsigned long r3,
 	}
 
 	if (unlikely(ti_flags & _TIF_SYSCALL_DOTRACE)) {
-		do_syscall_trace_leave(regs);
-		ret |= _TIF_RESTOREALL;
+		regs->exit_flags |= _TIF_RESTOREALL;
 	}
 
-	local_irq_disable();
-	ret = interrupt_exit_user_prepare_main(ret, regs);
+again:
+	syscall_exit_to_user_mode(regs);
+
+	user_enter_irqoff();
+	if (!prep_irq_for_enabled_exit(true)) {
+		user_exit_irqoff();
+		local_irq_enable();
+		local_irq_disable();
+		goto again;
+	}
+
+	/* Restore user access locks last */
+	kuap_user_restore(regs);
 
 #ifdef CONFIG_PPC64
-	regs->exit_result = ret;
+	regs->exit_result = regs->exit_flags;
 #endif
 
-	return ret;
+	return regs->exit_flags;
 }
 
 #ifdef CONFIG_PPC64
@@ -226,14 +232,18 @@ notrace unsigned long syscall_exit_restart(unsigned long r3, struct pt_regs *reg
 #ifdef CONFIG_PPC_BOOK3S_64
 	set_kuap(AMR_KUAP_BLOCKED);
 #endif
+again:
+	syscall_exit_to_user_mode(regs);
 
-	trace_hardirqs_off();
-	user_exit_irqoff();
-	account_cpu_user_entry();
+	user_enter_irqoff();
+	if (!prep_irq_for_enabled_exit(true)) {
+		user_exit_irqoff();
+		local_irq_enable();
+		local_irq_disable();
+		goto again;
+	}
 
-	BUG_ON(!user_mode(regs));
-
-	regs->exit_result = interrupt_exit_user_prepare_main(regs->exit_result, regs);
+	regs->exit_result |= regs->exit_flags;
 
 	return regs->exit_result;
 }
