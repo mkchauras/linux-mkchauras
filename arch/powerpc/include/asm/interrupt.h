@@ -152,11 +152,13 @@ static __always_inline void ____##func(struct pt_regs *regs);		\
 									\
 interrupt_handler void func(struct pt_regs *regs)			\
 {									\
-	interrupt_enter_prepare(regs);					\
-									\
+	irqentry_state_t state;						\
+	arch_interrupt_enter_prepare(regs);				\
+	state = irqentry_enter(regs);					\
+	instrumentation_begin();					\
 	____##func (regs);						\
-									\
-	interrupt_exit_prepare(regs);					\
+	instrumentation_end();						\
+	irqentry_exit(regs, state);					\
 }									\
 NOKPROBE_SYMBOL(func);							\
 									\

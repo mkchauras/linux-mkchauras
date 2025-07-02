@@ -196,6 +196,32 @@ static inline void check_return_regs_valid(struct pt_regs *regs)
 #endif
 }
 
+static inline void arch_interrupt_enter_prepare(struct pt_regs *regs)
+{
+#ifdef CONFIG_PPC64
+	irq_soft_mask_set(IRQS_ALL_DISABLED);
+
+	/*
+	 * If the interrupt was taken with HARD_DIS clear, then enable MSR[EE].
+	 * Asynchronous interrupts get here with HARD_DIS set (see below), so
+	 * this enables MSR[EE] for synchronous interrupts. IRQs remain
+	 * soft-masked. The interrupt handler may later call
+	 * interrupt_cond_local_irq_enable() to achieve a regular process
+	 * context.
+	 */
+	if (!(local_paca->irq_happened & PACA_IRQ_HARD_DIS)) {
+		INT_SOFT_MASK_BUG_ON(regs, !(regs->msr & MSR_EE));
+		__hard_irq_enable();
+	} else {
+		__hard_RI_enable();
+	}
+	/* Enable MSR[RI] early, to support kernel SLB and hash faults */
+#endif
+
+	if (!regs_irqs_disabled(regs))
+		trace_hardirqs_off();
+}
+
 static inline void interrupt_enter_prepare(struct pt_regs *regs)
 {
 #ifdef CONFIG_PPC64
@@ -438,8 +464,11 @@ static inline void interrupt_nmi_exit_prepare(struct pt_regs *regs, struct inter
 
 static __always_inline void arch_enter_from_user_mode(struct pt_regs *regs)
 {
-	if (IS_ENABLED(CONFIG_PPC_IRQ_SOFT_MASK_DEBUG))
+	kuap_lock();
+
+	if (IS_ENABLED(CONFIG_PPC_IRQ_SOFT_MASK_DEBUG)) {
 		BUG_ON(irq_soft_mask_return() != IRQS_ALL_DISABLED);
+	}
 
 	BUG_ON(regs_is_unrecoverable(regs));
 	BUG_ON(!user_mode(regs));
@@ -470,11 +499,8 @@ static __always_inline void arch_enter_from_user_mode(struct pt_regs *regs)
 	} else
 #endif
 		kuap_assert_locked();
-
 	booke_restore_dbcr0();
-
 	account_cpu_user_entry();
-
 	account_stolen_time();
 
 	/*

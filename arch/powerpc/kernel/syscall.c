@@ -19,8 +19,6 @@ notrace long system_call_exception(struct pt_regs *regs, unsigned long r0)
 	long ret;
 	syscall_fn f;
 
-	kuap_lock();
-
 	add_random_kstack_offset();
 	r0 = syscall_enter_from_user_mode(regs, r0);
 
