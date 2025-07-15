@@ -188,11 +188,14 @@ static __always_inline long ____##func(struct pt_regs *regs);		\
 interrupt_handler long func(struct pt_regs *regs)			\
 {									\
 	long ret;							\
+	irqentry_state_t state;						\
 									\
-	interrupt_enter_prepare(regs);					\
-									\
+	arch_interrupt_enter_prepare(regs);				\
+	state = irqentry_enter(regs);					\
+	irq_enter_rcu();						\
 	ret = ____##func (regs);					\
-									\
+	irq_exit_rcu();							\
+	irqentry_exit(regs, state);					\
 	interrupt_exit_prepare(regs);					\
 									\
 	return ret;							\
