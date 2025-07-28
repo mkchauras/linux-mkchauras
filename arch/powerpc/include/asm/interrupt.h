@@ -71,7 +71,6 @@
 
 #include <asm/kprobes.h>
 
-
 /*
  * Don't use noinstr here like x86, but rather add NOKPROBE_SYMBOL to each
  * function definition. The reason for this is the noinstr section is placed
@@ -159,6 +158,7 @@ interrupt_handler void func(struct pt_regs *regs)			\
 	____##func (regs);						\
 	instrumentation_end();						\
 	irqentry_exit(regs, state);					\
+	interrupt_exit_prepare(regs);					\
 }									\
 NOKPROBE_SYMBOL(func);							\
 									\
@@ -192,9 +192,9 @@ interrupt_handler long func(struct pt_regs *regs)			\
 									\
 	arch_interrupt_enter_prepare(regs);				\
 	state = irqentry_enter(regs);					\
-	irq_enter_rcu();						\
+	instrumentation_begin();					\
 	ret = ____##func (regs);					\
-	irq_exit_rcu();							\
+	instrumentation_end();						\
 	irqentry_exit(regs, state);					\
 	interrupt_exit_prepare(regs);					\
 									\
@@ -225,11 +225,16 @@ static __always_inline void ____##func(struct pt_regs *regs);		\
 									\
 interrupt_handler void func(struct pt_regs *regs)			\
 {									\
+	irqentry_state_t state;						\
 	interrupt_async_enter_prepare(regs);				\
-									\
+	state = irqentry_enter(regs);					\
+	instrumentation_begin();					\
+	irq_enter_rcu();						\
 	____##func (regs);						\
-									\
+	irq_exit_rcu();							\
+	instrumentation_end();						\
 	interrupt_async_exit_prepare(regs);				\
+	irqentry_exit(regs, state);					\
 }									\
 NOKPROBE_SYMBOL(func);							\
 									\
@@ -259,14 +264,43 @@ ____##func(struct pt_regs *regs);					\
 									\
 interrupt_handler long func(struct pt_regs *regs)			\
 {									\
-	struct interrupt_nmi_state state;				\
+	irqentry_state_t state;						\
+	struct interrupt_nmi_state nmi_state;				\
 	long ret;							\
 									\
-	interrupt_nmi_enter_prepare(regs, &state);			\
-									\
+	interrupt_nmi_enter_prepare(regs, &nmi_state);			\
+	if (mfmsr() & MSR_DR) {						\
+		/* nmi_entry if relocations are on */			\
+		state = irqentry_nmi_enter(regs);			\
+	} else if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) &&			\
+		   firmware_has_feature(FW_FEATURE_LPAR) &&		\
+		   !radix_enabled()) {					\
+		/* no nmi_entry for a pseries hash guest		\
+		 * taking a real mode exception */			\
+	} else if (IS_ENABLED(CONFIG_KASAN)) {				\
+		/* no nmi_entry for KASAN in real mode */		\
+	} else if (percpu_first_chunk_is_paged) {			\
+		/* no nmi_entry if percpu first chunk is not embedded */\
+	} else {							\
+		state = irqentry_nmi_enter(regs);			\
+	}								\
 	ret = ____##func (regs);					\
-									\
-	interrupt_nmi_exit_prepare(regs, &state);			\
+	if (mfmsr() & MSR_DR) {						\
+		/* nmi_exit if relocations are on */			\
+		irqentry_nmi_exit(regs, state);				\
+	} else if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) &&			\
+		   firmware_has_feature(FW_FEATURE_LPAR) &&		\
+		   !radix_enabled()) {					\
+		/* no nmi_exit for a pseries hash guest			\
+		 * taking a real mode exception */			\
+	} else if (IS_ENABLED(CONFIG_KASAN)) {				\
+		/* no nmi_exit for KASAN in real mode */		\
+	} else if (percpu_first_chunk_is_paged) {			\
+		/* no nmi_exit if percpu first chunk is not embedded */	\
+	} else {							\
+		irqentry_nmi_exit(regs, state);				\
+	}								\
+	interrupt_nmi_exit_prepare(regs,&nmi_state);			\
 									\
 	return ret;							\
 }									\

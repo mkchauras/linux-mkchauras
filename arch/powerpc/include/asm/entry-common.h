@@ -297,7 +297,7 @@ static inline void interrupt_async_enter_prepare(struct pt_regs *regs)
 	/* Ensure interrupt_enter_prepare does not enable MSR[EE] */
 	local_paca->irq_happened |= PACA_IRQ_HARD_DIS;
 #endif
-	interrupt_enter_prepare(regs);
+	arch_interrupt_enter_prepare(regs);
 #ifdef CONFIG_PPC_BOOK3S_64
 	/*
 	 * RI=1 is set by interrupt_enter_prepare, so this thread flags access
@@ -307,7 +307,6 @@ static inline void interrupt_async_enter_prepare(struct pt_regs *regs)
 	    !test_thread_local_flags(_TLF_RUNLATCH))
 		__ppc64_runlatch_on();
 #endif
-	irq_enter();
 }
 
 static inline void interrupt_async_exit_prepare(struct pt_regs *regs)
@@ -319,8 +318,6 @@ static inline void interrupt_async_exit_prepare(struct pt_regs *regs)
 	 * here, then that interrupt would return directly to idle nap return.
 	 */
 	nap_adjust_return(regs);
-
-	irq_exit();
 	interrupt_exit_prepare(regs);
 }
 
@@ -350,7 +347,49 @@ static inline bool nmi_disables_ftrace(struct pt_regs *regs)
 	return true;
 }
 
-static inline void interrupt_nmi_enter_prepare(struct pt_regs *regs, struct interrupt_nmi_state *state)
+//static inline irqentry_state_t arch_nmi_enter_prepare(struct pt_regs *regs)
+//{
+//	irqentry_state_t state;
+//	if (mfmsr() & MSR_DR) {
+//		// nmi_exit if relocations are on
+//		state = irqentry_nmi_enter(regs);
+//	} else if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) &&
+//		   firmware_has_feature(FW_FEATURE_LPAR) &&
+//		   !radix_enabled()) {
+//		// no nmi_exit for a pseries hash guest taking a real mode exception
+//	} else if (IS_ENABLED(CONFIG_KASAN)) {
+//		// no nmi_exit for KASAN in real mode
+//	} else if (percpu_first_chunk_is_paged) {
+//		// no nmi_exit if percpu first chunk is not embedded
+//	} else {
+//		state = irqentry_nmi_enter(regs);
+//	}
+//
+//	return state;
+//}
+//
+//static inline void arch_nmi_exit_prepare(struct pt_regs *regs,
+//					 irqentry_state_t state)
+//{
+//	if (mfmsr() & MSR_DR) {
+//		// nmi_exit if relocations are on
+//		irqentry_nmi_exit(regs, state);
+//	} else if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) &&
+//		   firmware_has_feature(FW_FEATURE_LPAR) &&
+//		   !radix_enabled()) {
+//		// no nmi_exit for a pseries hash guest taking a real mode exception
+//	} else if (IS_ENABLED(CONFIG_KASAN)) {
+//		// no nmi_exit for KASAN in real mode
+//	} else if (percpu_first_chunk_is_paged) {
+//		// no nmi_exit if percpu first chunk is not embedded
+//	} else {
+//		irqentry_nmi_exit(regs, state);
+//	}
+//}
+
+
+static inline void interrupt_nmi_enter_prepare(struct pt_regs *regs,
+					       struct interrupt_nmi_state *state)
 {
 #ifdef CONFIG_PPC64
 	state->irq_soft_mask = local_paca->irq_soft_mask;
@@ -385,58 +424,11 @@ static inline void interrupt_nmi_enter_prepare(struct pt_regs *regs, struct inte
 		this_cpu_set_ftrace_enabled(0);
 	}
 #endif
-
-	/* If data relocations are enabled, it's safe to use nmi_enter() */
-	if (mfmsr() & MSR_DR) {
-		nmi_enter();
-		return;
-	}
-
-	/*
-	 * But do not use nmi_enter() for pseries hash guest taking a real-mode
-	 * NMI because not everything it touches is within the RMA limit.
-	 */
-	if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) &&
-	    firmware_has_feature(FW_FEATURE_LPAR) &&
-	    !radix_enabled())
-		return;
-
-	/*
-	 * Likewise, don't use it if we have some form of instrumentation (like
-	 * KASAN shadow) that is not safe to access in real mode (even on radix)
-	 */
-	if (IS_ENABLED(CONFIG_KASAN))
-		return;
-
-	/*
-	 * Likewise, do not use it in real mode if percpu first chunk is not
-	 * embedded. With CONFIG_NEED_PER_CPU_PAGE_FIRST_CHUNK enabled there
-	 * are chances where percpu allocation can come from vmalloc area.
-	 */
-	if (percpu_first_chunk_is_paged)
-		return;
-
-	/* Otherwise, it should be safe to call it */
-	nmi_enter();
 }
 
-static inline void interrupt_nmi_exit_prepare(struct pt_regs *regs, struct interrupt_nmi_state *state)
+static inline void interrupt_nmi_exit_prepare(struct pt_regs *regs,
+					      struct interrupt_nmi_state *state)
 {
-	if (mfmsr() & MSR_DR) {
-		// nmi_exit if relocations are on
-		nmi_exit();
-	} else if (IS_ENABLED(CONFIG_PPC_BOOK3S_64) &&
-		   firmware_has_feature(FW_FEATURE_LPAR) &&
-		   !radix_enabled()) {
-		// no nmi_exit for a pseries hash guest taking a real mode exception
-	} else if (IS_ENABLED(CONFIG_KASAN)) {
-		// no nmi_exit for KASAN in real mode
-	} else if (percpu_first_chunk_is_paged) {
-		// no nmi_exit if percpu first chunk is not embedded
-	} else {
-		nmi_exit();
-	}
-
 	/*
 	 * nmi does not call nap_adjust_return because nmi should not create
 	 * new work to do (must use irq_work for that).
